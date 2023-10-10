@@ -1,6 +1,5 @@
 from app.api import *
 from tasks.ask import ask
-from  tasks.webcast import startlive 
 from utils import  checkroom, getAccessToken,filter_content
 import xml.etree.ElementTree as ET
 import hashlib
@@ -21,12 +20,6 @@ MESSAGE_INVALID = config['msg']['MESSAGE_INVALID']
 MESSAGE_TOO_REQ = config['msg']['MESSAGE_TOO_REQ'] 
 MESSAGE_WELCOME = config['msg'] ['MESSAGE_WELCOME']
 MESSAGE_QUOTA = config['msg']['MESSAGE_QUOTA']
-#MESSAGE_WAIT = "正在思考，请稍等"
-#MESSAGE_NO_BOT = "系统忙，请您稍后再试！"
-#MESSAGE_INVALID = "您的问题过于敏感，无法回答！"
-#MESSAGE_TOO_REQ= "提问过于频繁，请稍后再试"
-#MESSAGE_WELCOME="您好，我是一个人工智能助手，可以回答小学的数学、语文、英语、地理等科目问题。"
-#MESSAGE_QUOTA="您的免费提问次数已用完，请明天再试";
 
 
 def buildResponse(from_user,to_user,answer):
@@ -83,20 +76,6 @@ def handle_ask():
     content = root.find('Content').text
     if content.startswith("tt_live"):
         parts = content.split(":")
-        if len(parts) > 1 and  len(parts[1].split(","))==2:
-           room_id, uid = parts[1].split(",")
-           print("room_id:", room_id)
-           print("uid:", uid)
-           if  checkroom(uid):
-             print("start   live....")
-             startlive.delay(room_id, uid,from_user)
-             return  buildResponse(from_user,to_user, "start  live....");
-           else:
-             return  buildResponse(from_user,to_user,  uid+ "  has  connected");
-        else:
-           print("Invalid input string format")
-           return buildResponse(from_user,to_user,"Invalid  tt live input format");
-
 
     filtered = filter_content(content);
     if  filtered:
