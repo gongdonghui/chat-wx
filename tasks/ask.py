@@ -40,7 +40,6 @@ def ask(content,from_user,chatid):
    answer = ""
    try:
         openai.api_key=utils.openai_api_key
-#'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'
         key = f"wxuser_{from_user}"
         response_data =  openai.ChatCompletion.create(model="gpt-4-0613",\
 messages=prepareContext(key,content))
