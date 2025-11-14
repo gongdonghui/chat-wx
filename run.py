@@ -1,7 +1,5 @@
 # import module 
-from app import *
-
-from tasks.ask import ask 
+from app import create_app
 
 app = create_app('default')
 
