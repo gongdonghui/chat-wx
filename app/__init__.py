@@ -13,14 +13,12 @@ def create_app(config_name):
     app.config.from_object(config[config_name])
     config[config_name].init_app(app)
     # import module
-    from app.api.wechat import wechat
     from app.api.rag import rag
     #from app.api.handle_login import handle_login
     #from app.api.get_answer import  get_answer
     #from app.api.ask_lp import ask_lp
     #from app.api.history import history
     # register blueprint
-    app.register_blueprint(wechat)
     app.register_blueprint(rag)
     #app.register_blueprint(handle_login)
    # app.register_blueprint(get_answer)

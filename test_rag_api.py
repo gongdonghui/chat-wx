@@ -7,7 +7,7 @@ BASE_URL = "http://localhost:5001"
 def test_upload_text():
     """测试上传文本接口"""
     print("测试上传文本接口...")
-    url = f"{BASE_URL}/upload"
+    url = f"{BASE_URL}/rag/upload"
     
     # 测试文本
     test_text = """
@@ -65,8 +65,8 @@ def test_upload_text():
 
 def test_query():
     """测试查询接口"""
-    print("\n测试查询接口...")
-    url = f"{BASE_URL}/query"
+    print("测试查询接口...")
+    url = f"{BASE_URL}/rag/query"
     
     data = {
         "query": "什么是RAG系统中的文本分块？"

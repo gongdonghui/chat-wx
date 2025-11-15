@@ -1,7 +1,9 @@
 from app.api import *
-from sentence_transformers import SentenceTransformer
+import requests
+
 from rank_bm25 import BM25Okapi
 import faiss
+import numpy as np
 import numpy as np
 import re
 import requests
@@ -16,15 +18,17 @@ config.read('config.ini')
 
 # 加载配置
 VLLM_SERVER_URL = config.get('vllm', 'server_url', fallback='http://your-vllm-server-address/generate')
-EMBEDDING_MODEL = 'paraphrase-multilingual-MiniLM-L12-v2'
+VLLM_RERANK_URL = config.get('vllm', 'rerank_url', fallback='http://your-vllm-server-address/rerank')
+EMBEDDING_MODEL = 'BAAI/bge-large-zh'  # 更适合中文的嵌入模型
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
 RRF_K = 60
 TOP_K = 10
 TOP_N = 5
+RERANK_TOP_N = 5  # rerank后保留的文档数
 
-# 初始化模型和存储
-model = SentenceTransformer(EMBEDDING_MODEL)
+# VLLM嵌入服务配置
+VLLM_EMBEDDING_URL = "http://localhost:8000/embed"  # VLLM嵌入服务地址
 
 documents = []
 embeddings = []
@@ -109,25 +113,20 @@ def split_text(text, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, mode='f
     return chunks
 
 # RRF融合排序
-def rrf_fusion(results1, results2, k=60):
+def rrf_fusion(results_list, k=60):
     """
-    逆序位融合
-    :param results1: 第一个检索结果列表 [(doc_id, score), ...]
-    :param results2: 第二个检索结果列表 [(doc_id, score), ...]
+    逆序位融合（支持多个检索结果）
+    :param results_list: 检索结果列表 [[(doc_id, score), ...], ...]
     :param k: RRF参数
     :return: 融合后的结果列表 [(doc_id, score), ...]
     """
     rrf_scores = {}
     
-    for rank, (doc_id, score) in enumerate(results1):
-        if doc_id not in rrf_scores:
-            rrf_scores[doc_id] = 0
-        rrf_scores[doc_id] += 1 / (rank + k)
-    
-    for rank, (doc_id, score) in enumerate(results2):
-        if doc_id not in rrf_scores:
-            rrf_scores[doc_id] = 0
-        rrf_scores[doc_id] += 1 / (rank + k)
+    for results in results_list:
+        for rank, (doc_id, score) in enumerate(results):
+            if doc_id not in rrf_scores:
+                rrf_scores[doc_id] = 0
+            rrf_scores[doc_id] += 1 / (rank + k)
     
     # 按得分降序排序
     fused_results = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -161,13 +160,17 @@ def upload_text():
     # 更新文档列表
     documents.extend(chunks)
     
-    # 生成向量嵌入
-    new_embeddings = model.encode(chunks)
+    # 生成文档向量（使用VLLM嵌入服务）
+    headers = {"Content-Type": "application/json"}
+    data = {"model": EMBEDDING_MODEL, "input": chunks}
+    response = requests.post(VLLM_EMBEDDING_URL, json=data, headers=headers)
+    response.raise_for_status()
+    new_embeddings = np.array([item["embedding"] for item in response.json()["data"]], dtype='float32')
     embeddings.extend(new_embeddings.tolist())
     
-    # 构建BM25索引
+    # 构建BM25索引（优化参数）
     tokenized_docs = [doc.split() for doc in documents]
-    bm25 = BM25Okapi(tokenized_docs)
+    bm25 = BM25Okapi(tokenized_docs, k1=1.5, b=0.75)  # 调整BM25参数提高精度
     
     # 构建FAISS向量索引
     embeddings_np = np.array(embeddings, dtype='float32')
@@ -195,26 +198,126 @@ def rag_query():
     if not documents or not bm25 or not index:
         return jsonify({'error': 'No documents indexed yet'}), 400
     
-    # BM25检索
-    tokenized_query = query.split()
+    # 参数配置
+    TOP_N = 10  # 每个检索方法取前N个结果
+    FINAL_TOP_N = 5  # 最终返回的相关文档数
+    SIMILARITY_THRESHOLD = 0.2  # 向量检索相似度阈值（归一化后）
+    
+    # 1. 查询理解与扩展
+    import sys
+    import os
+    sys.path.append('/Users/gongshuai/workspace/chat-wx')
+    from query_expansion import expand_query
+    expanded_query = expand_query(query)
+    
+    # 2. BM25检索
+    tokenized_query = expanded_query.split()
     bm25_scores = bm25.get_scores(tokenized_query)
     bm25_results = [(i, score) for i, score in enumerate(bm25_scores)]
-    bm25_results = sorted(bm25_results, key=lambda x: x[1], reverse=True)[:10]
+    bm25_results = sorted(bm25_results, key=lambda x: x[1], reverse=True)[:TOP_N]
     
-    # 向量检索
-    query_embedding = model.encode([query])
-    D, I = index.search(query_embedding, 10)
-    vector_results = [(i, 1/(d+1)) for i, d in zip(I[0], D[0])]  # 转换为相似度得分
+    # 2. 向量检索
+    headers = {"Content-Type": "application/json"}
+    data = {"model": EMBEDDING_MODEL, "input": [query]}
+    response = requests.post(VLLM_EMBEDDING_URL, json=data, headers=headers)
+    response.raise_for_status()
+    query_embedding = np.array([response.json()["data"][0]["embedding"]], dtype='float32')
+    D, I = index.search(query_embedding, TOP_N)
     
-    # 融合排序
-    fused_results = rrf_fusion(vector_results, bm25_results)
+    # 归一化向量检索得分（转换为相似度）
+    vector_results = []
+    for i, d in zip(I[0], D[0]):
+        # 计算余弦相似度（假设FAISS使用的是L2距离）
+        # 余弦相似度 = 1 / (1 + L2距离) （简化版，更精确的需要向量归一化）
+        similarity = 1 / (1 + d)
+        if similarity >= SIMILARITY_THRESHOLD:
+            vector_results.append((i, similarity))
+    
+    # 3. 关键词匹配增强
+    # 提取查询中的关键词
+    import jieba
+    jieba.setLogLevel(20)
+    keywords = list(jieba.cut_for_search(query))
+    keywords = [kw for kw in keywords if len(kw) > 1]  # 过滤短词
+    
+    keyword_results = []
+    if keywords:
+        for i, doc in enumerate(documents):
+            score = 0
+            for kw in keywords:
+                if kw in doc:
+                    score += 1
+            if score > 0:
+                keyword_results.append((i, score))
+        keyword_results = sorted(keyword_results, key=lambda x: x[1], reverse=True)[:TOP_N]
+    
+    # 4. 融合排序
+    results_list = [bm25_results, vector_results]
+    if keyword_results:
+        results_list.append(keyword_results)
+    
+    fused_results = rrf_fusion(results_list, k=50)  # 调整k值可能影响结果
+    
+    # 5. 去重并过滤低得分结果
+    unique_docs = {}
+    for doc_id, score in fused_results:
+        if doc_id not in unique_docs:
+            unique_docs[doc_id] = score
+    
+    # 6. Rerank重排
+    reranked_docs = []
+    candidate_docs = sorted(unique_docs.items(), key=lambda x: x[1], reverse=True)[:TOP_K]  # 取前TOP_K个结果进行rerank
+    
+    if candidate_docs:
+        try:
+            # 调用vllm的rerank服务
+            rerank_input = {
+                'query': query,
+                'documents': [documents[doc_id] for doc_id, score in candidate_docs],
+                'top_n': RERANK_TOP_N
+            }
+            
+            response = requests.post(
+                VLLM_RERANK_URL,
+                json=rerank_input
+            )
+            
+            if response.status_code == 200:
+                rerank_results = response.json().get('results', [])
+                
+                # 构建rerank后的结果
+                reranked_docs = []
+                for i, result in enumerate(rerank_results):
+                    doc_id = candidate_docs[i][0]
+                    reranked_docs.append({
+                        'doc_id': doc_id,
+                        'content': documents[doc_id],
+                        'score': result.get('score', candidate_docs[i][1]),
+                        'rerank_score': result.get('score', 0.0)
+                    })
+                
+                # 如果rerank返回结果不足，补充原始结果
+                if len(reranked_docs) < FINAL_TOP_N:
+                    remaining_docs = [doc for doc in candidate_docs if doc[0] not in [d['doc_id'] for d in reranked_docs]]
+                    for doc_id, score in remaining_docs[:FINAL_TOP_N - len(reranked_docs)]:
+                        reranked_docs.append({
+                            'doc_id': doc_id,
+                            'content': documents[doc_id],
+                            'score': score
+                        })
+        except Exception as e:
+            # 若rerank失败，使用原始融合结果
+            print(f"Rerank服务调用异常：{str(e)}")
+            reranked_docs = [{
+                'doc_id': doc_id,
+                'content': documents[doc_id],
+                'score': score
+            } for doc_id, score in candidate_docs[:FINAL_TOP_N]]
+    else:
+        reranked_docs = []
     
     # 获取最相关的文档
-    retrieved_docs = [{
-        'doc_id': doc_id,
-        'content': documents[doc_id],
-        'score': score
-    } for doc_id, score in fused_results[:5]]
+    retrieved_docs = reranked_docs[:FINAL_TOP_N]
     
     # 调用大模型生成答案
     context = '\n'.join([doc['content'] for doc in retrieved_docs])
