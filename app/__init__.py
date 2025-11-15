@@ -1,13 +1,9 @@
 from config import config
-#celery
-from celery import Celery
 from flask import Flask,request,json,jsonify,Blueprint,send_from_directory
 import os
 import datetime
 import logging
 from logging.handlers import TimedRotatingFileHandler
-celery = Celery(__name__)
-celery.config_from_object('tasks.celeryconfig')
 
 
 def create_app(config_name):
@@ -18,12 +14,14 @@ def create_app(config_name):
     config[config_name].init_app(app)
     # import module
     from app.api.wechat import wechat
+    from app.api.rag import rag
     #from app.api.handle_login import handle_login
     #from app.api.get_answer import  get_answer
     #from app.api.ask_lp import ask_lp
     #from app.api.history import history
     # register blueprint
     app.register_blueprint(wechat)
+    app.register_blueprint(rag)
     #app.register_blueprint(handle_login)
    # app.register_blueprint(get_answer)
    # app.register_blueprint(ask_lp)
