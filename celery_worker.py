@@ -1,4 +1,4 @@
-from app import create_app,celery
+from app import create_app, celery
 
 app = create_app('default')
 print("celery  worker  create  app  complete!")

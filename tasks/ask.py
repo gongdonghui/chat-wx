@@ -6,9 +6,17 @@ import json
 import uuid
 import base64
 import openai
-from ssdb import SSDB
 import  time
 import  utils
+
+# 尝试导入SSDB客户端，若失败则跳过
+ssdb_available = False
+try:
+    from ssdb import SSDB
+    ssdb_available = True
+except ImportError:
+    SSDB = None
+    print("SSDB client not available, some functionality may be limited")
 first_message  = {"role": "system", "content": '你是一个小学老师，可以回答数学、语文、英语、地理等科目问题，'}
 
 def sendCustomMsg(answer,from_user) :

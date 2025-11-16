@@ -1,5 +1,6 @@
 from app.api import *
 import requests
+from tasks import generate_meeting_minutes
 
 from rank_bm25 import BM25Okapi
 import faiss
@@ -9,6 +10,14 @@ import re
 import requests
 import json
 import configparser
+import os
+import tempfile
+from docx import Document
+from pptx import Presentation
+from openpyxl import load_workbook
+from werkzeug.utils import secure_filename
+import uuid
+from app.utils.storage import storage
 
 rag = Blueprint('rag', __name__)
 
@@ -352,4 +361,174 @@ def get_docs():
     return jsonify({
         'total_docs': len(documents),
         'documents': documents
+    })
+
+# 全局变量存储会议背景知识
+meeting_backgrounds = {}
+
+# 读取Word文档
+@rag.route('/rag/upload_background', methods=['POST'])
+def upload_background():
+    """
+    上传会议背景知识文件（Word/PPT/Excel）
+    """
+    global meeting_backgrounds
+    
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    # 生成唯一ID
+    background_id = str(uuid.uuid4())
+    
+    # 使用统一存储系统保存文件
+    temp_path = storage.save_file(file, directory='background', suffix=os.path.splitext(secure_filename(file.filename))[1].lower())
+    
+    # 解析文件内容
+    content = ''
+    file_ext = os.path.splitext(secure_filename(file.filename))[1].lower()
+    
+    try:
+        if file_ext == '.docx':
+            # 读取Word文档
+            doc = Document(temp_path)
+            for para in doc.paragraphs:
+                content += para.text + '\n'
+        elif file_ext == '.pptx':
+            # 读取PPT文档
+            prs = Presentation(temp_path)
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, 'text'):
+                        content += shape.text + '\n'
+        elif file_ext == '.xlsx':
+            # 读取Excel文档
+            wb = load_workbook(temp_path)
+            for sheet in wb.sheetnames:
+                ws = wb[sheet]
+                for row in ws.iter_rows(values_only=True):
+                    if row and any(cell for cell in row):
+                        row_content = '\t'.join(str(cell) if cell is not None else '' for cell in row)
+                        content += row_content + '\n'
+        elif file_ext == '.txt':
+            # 读取文本文件
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        else:
+            os.unlink(temp_path)
+            return jsonify({'error': 'Unsupported file format. Supported: docx, pptx, xlsx, txt'}), 400
+        
+        # 保存背景知识
+        meeting_backgrounds[background_id] = {
+            'id': background_id,
+            'filename': secure_filename(file.filename),
+            'content': content,
+            'upload_time': time.time()
+        }
+        
+        os.unlink(temp_path)
+        
+        return jsonify({
+            'message': 'Background knowledge uploaded and parsed successfully',
+            'background_id': background_id,
+            'filename': secure_filename(file.filename),
+            'content_length': len(content)
+        })
+        
+    except Exception as e:
+        os.unlink(temp_path)
+        return jsonify({'error': 'Failed to parse file: ' + str(e)}), 500
+
+# 导入线程池和线程相关模块
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+
+
+
+
+@rag.route('/rag/generate_minutes', methods=['POST'])
+def generate_minutes():
+    """
+    生成会议记录：上传音频文件，结合背景知识生成会议记录
+    """
+    global meeting_backgrounds
+    
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+    
+    audio_file = request.files['audio']
+    background_id = request.form.get('background_id')
+    
+    # 验证音频文件
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    
+    # 检查背景知识
+    background_content = ''
+    if background_id:
+        if background_id not in meeting_backgrounds:
+            return jsonify({'error': 'Invalid background_id'}), 400
+        background_content = meeting_backgrounds[background_id]['content']
+    
+    # 使用统一存储系统保存音频文件
+    audio_ext = os.path.splitext(secure_filename(audio_file.filename))[1].lower()
+    audio_temp_path = storage.save_file(audio_file, directory='audio', suffix=audio_ext)
+    
+    try:
+        # 异步调用Celery任务生成会议记录
+        task = generate_meeting_minutes.delay(audio_temp_path, audio_file.filename, background_id, background_content)
+        
+        return jsonify({
+            'message': '会议记录生成任务已启动',
+            'task_id': task.id,
+            'background_id': background_id
+        })
+        
+    except Exception as e:
+        os.unlink(audio_temp_path)
+        return jsonify({'error': 'Failed to start meeting minutes generation task: ' + str(e)}), 500
+
+@rag.route('/rag/meeting_task/<task_id>', methods=['GET'])
+def get_meeting_task_status(task_id):
+    """
+    查询会议记录生成任务状态
+    """
+    from tasks import generate_meeting_minutes
+    
+    # 使用Celery的AsyncResult查询任务状态
+    task_result = generate_meeting_minutes.AsyncResult(task_id)
+    
+    if not task_result:
+        return jsonify({'error': 'Invalid task_id'}), 400
+    
+    status = task_result.status.lower()
+    message = ''
+    transcript = ''
+    minutes = ''
+    background_id = ''
+    
+    # 获取任务结果
+    if task_result.ready():
+        if task_result.successful():
+            result = task_result.result
+            message = '会议记录生成成功'
+            transcript = result.get('transcript', '')
+            minutes = result.get('minutes', '')
+            background_id = result.get('background_id', '')
+        else:
+            message = f'生成失败：{str(task_result.result)}'
+    else:
+        message = '任务正在处理中'
+    
+    return jsonify({
+        'task_id': task_id,
+        'status': status,
+        'message': message,
+        'transcript': transcript,
+        'minutes': minutes,
+        'background_id': background_id
     })

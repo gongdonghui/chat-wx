@@ -8,7 +8,15 @@ import requests
 import json
 import jieba
 import jieba.posseg as pseg
-from ssdb import SSDB
+
+# 尝试导入SSDB客户端，若失败则跳过
+ssdb_available = False
+try:
+    from ssdb import SSDB
+    ssdb_available = True
+except ImportError:
+    SSDB = None
+    print("SSDB client not available, some functionality may be limited")
 config = configparser.ConfigParser()
 config.read('config.ini')
 ssdb_client=None
@@ -21,7 +29,10 @@ first_message  = {"role": "system", "content": '你是一个小学老师，可�
 jieba.setLogLevel(20)
 try:
   redis_client = redis.Redis(host=str(config['redis']['ip']), port=config['redis']['port'])
-  ssdb_client = SSDB(str(config['ssdb']['ip']),8448)
+  if ssdb_available:
+    ssdb_client = SSDB(str(config['ssdb']['ip']),8448)
+  else:
+    ssdb_client = None
 except  Exception as e:
    print(f"An error occurred while init db client: {e}")
 
