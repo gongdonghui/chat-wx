@@ -1,6 +1,7 @@
 # import tasks
 imports = (
-    'tasks.ask'
+    'tasks.ask',
+    'tasks.meeting'
     )
 
 # #Timezone

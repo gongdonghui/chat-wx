@@ -4,7 +4,13 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 
 class Config:
     SECRET_KEY = 'guess'
-
+    
+    # Celery Configuration
+    CELERY_BROKER_URL = 'redis://172.30.226.220:6379/0'
+    CELERY_RESULT_BACKEND = 'redis://172.30.226.220:6379/0'
+    CELERY_ENABLE_UTC = False
+    CELERY_TIMEZONE = 'Asia/Taipei'
+    
     @staticmethod
     def init_app(app):
         pass
