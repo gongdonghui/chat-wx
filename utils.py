@@ -36,8 +36,105 @@ try:
 except  Exception as e:
    print(f"An error occurred while init db client: {e}")
 
-with open('keywords.txt', 'r') as f:
-        keywords = [line.strip() for line in f.readlines()]
+# AC自动机类
+class ACAutomaton:
+    class Node:
+        def __init__(self):
+            self.children = {}  # 子节点
+            self.fail = None    # 失败指针
+            self.is_end = False  # 是否为敏感词结尾
+            self.word = None     # 存储完整敏感词
+    
+    def __init__(self):
+        self.root = self.Node()
+    
+    def add_word(self, word):
+        """添加敏感词到AC自动机"""
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = self.Node()
+            node = node.children[char]
+        node.is_end = True
+        node.word = word
+    
+    def build_fail(self):
+        """构建失败指针"""
+        import collections
+        queue = collections.deque()
+        
+        # 初始化根节点的所有子节点的失败指针为根节点
+        for node in self.root.children.values():
+            node.fail = self.root
+            queue.append(node)
+        
+        while queue:
+            current_node = queue.popleft()
+            
+            for char, child_node in current_node.children.items():
+                fail_node = current_node.fail
+                
+                # 查找失败指针
+                while fail_node is not None and char not in fail_node.children:
+                    fail_node = fail_node.fail
+                    
+                if fail_node is None:
+                    child_node.fail = self.root
+                else:
+                    child_node.fail = fail_node.children[char]
+                    
+                queue.append(child_node)
+    
+    def search(self, text):
+        """在文本中搜索敏感词"""
+        node = self.root
+        found_words = set()
+        
+        for char in text:
+            # 沿着失败指针查找
+            while node != self.root and char not in node.children:
+                node = node.fail
+            
+            if char in node.children:
+                node = node.children[char]
+            else:
+                node = self.root
+            
+            # 检查当前节点及其失败指针链上的所有节点是否为敏感词结尾
+            temp_node = node
+            while temp_node != self.root:
+                if temp_node.is_end:
+                    found_words.add(temp_node.word)
+                temp_node = temp_node.fail
+        
+        return found_words
+
+# 加载敏感词并构建AC自动机
+sensitive_automaton = ACAutomaton()
+with open('sensitive_words.txt', 'r', encoding='utf-8') as f:
+    for line in f:
+        word = line.strip()
+        if word and not word.startswith('#'):
+            # 同时添加原始词、小写词、全角转半角词，提高匹配效率
+            sensitive_automaton.add_word(word)
+            sensitive_automaton.add_word(word.lower())
+            # 构建时不需要重复添加全角转半角词，运行时统一处理
+
+# 构建失败指针
+sensitive_automaton.build_fail()
+
+# 全角转半角函数
+def full_to_half(s):
+    result = []
+    for char in s:
+        code = ord(char)
+        if code == 0x3000:  # 全角空格转半角空格
+            result.append(' ')
+        elif 0xFF01 <= code <= 0xFF5E:  # 全角字符转半角
+            result.append(chr(code - 0xFEE0))
+        else:
+            result.append(char)
+    return ''.join(result)
 
 def  send_msg_back(answer,chatid):  #save  answoer  for request 
     redis_client.set(chatid, answer)
@@ -111,13 +208,20 @@ def buildJsonResponse(from_user, to_user, chatid):
     }
     return json.dumps(response, ensure_ascii=False).encode('utf8')
 def filter_content(content):
-    for keyword in keywords:
-        if keyword in content:
-            # Do something, for example, send an alert
-            print(f"Alert: Content contains keyword '{keyword}'")
-            return  True;
-            break
-    return  False;
+    if not content:
+        return False
+    
+    # 预处理内容：全角转半角、转为小写
+    processed_content = full_to_half(content).lower()
+    
+    # 使用AC自动机搜索敏感词
+    found_words = sensitive_automaton.search(processed_content)
+    
+    if found_words:
+        for word in found_words:
+            print(f"Alert: Content contains sensitive word '{word}'")
+        return True
+    return False;
 def buildJsonResponse(from_user, to_user, chatid):
     response = {
         "ToUserName": from_user,
